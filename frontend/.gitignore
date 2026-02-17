@@ -1,0 +1,17 @@
+# Node modules
+node_modules/
+
+# Environment variables
+.env
+
+# Database files
+*.sqlite
+
+# Upload folder
+uploads/
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
