@@ -20,7 +20,7 @@ const app = express();
 /**
  * ============================================================
  * GLOBAL MIDDLEWARE (MUST COME BEFORE ROUTES)
- * ------------------------------------------------------------
+ * --------------------                          ----------------------------------------
  * - cors() allows frontend to call backend
  * - express.json() parses incoming JSON body
  *   Without this, req.body will be undefined

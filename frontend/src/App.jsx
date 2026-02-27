@@ -1,49 +1,110 @@
-import { useEffect, useState } from "react";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+
 import Login from "./pages/Login";
-import Dashboard from "./pages/Dashboard";
-import { getToken, getUser, setUser, clearToken } from "./api";
+import PublicJobs from "./pages/PublicJobs";
+import PublicJobDetails from "./pages/PublicJobDetails";
+
+import RecruiterDashboard from "./pages/recruiter/RecruiterDashboard";
+import CandidateDashboard from "./pages/candidate/CandidateDashboard";
+import AdminDashboard from "./pages/admin/AdminDashboard";
+import SystemLogs from "./pages/admin/SystemLogs";
+
+import ProtectedRoute from "./components/ProtectedRoute";
+import RoleRoute from "./components/RoleRoute";
+
+import RankingsPage from "./pages/recruiter/RankingsPage";
+import CandidateDetails from "./pages/recruiter/CandidateDetails";
 
 export default function App() {
-  const [token, setTokenState] = useState(getToken());
-  const [user, setUserState] = useState(getUser());
+  return (
+    <BrowserRouter>
+      <Routes>
+        {/* =====================================================
+           PUBLIC (NO LOGIN REQUIRED)
+           UC-00: Browse Open Jobs
+           UC-00b: View Job Details
+        ====================================================== */}
+        <Route path="/" element={<PublicJobs />} />
+        <Route path="/jobs/:jobId" element={<PublicJobDetails />} />
+        <Route path="/login" element={<Login />} />
 
-  // Called after login success (Login.jsx should call onLogin(data.user))
-  function handleLogin(u) {
-    // token is already stored by setToken(data.token) inside Login.jsx
-    setTokenState(getToken());
+        {/* =====================================================
+           PROTECTED ROLE ROUTES (LOGIN REQUIRED)
+        ====================================================== */}
 
-    // Save user in both state + localStorage (role-based UI needs it)
-    if (u) {
-      setUser(u);        // localStorage
-      setUserState(u);   // React state
-    } else {
-      // fallback: try reading whatever is in localStorage
-      setUserState(getUser());
-    }
-  }
+        {/* Jobseeker only */}
+        <Route
+          path="/candidate"
+          element={
+            <ProtectedRoute>
+              <RoleRoute allowedRoles={["jobseeker"]}>
+                <CandidateDashboard />
+              </RoleRoute>
+            </ProtectedRoute>
+          }
+        />
 
-  function handleLogout() {
-    clearToken();          // removes token + user from localStorage (based on your api.js)
-    setTokenState(null);
-    setUserState(null);
-  }
+        {/* Recruiter + Admin */}
+        <Route
+          path="/recruiter"
+          element={
+            <ProtectedRoute>
+              <RoleRoute allowedRoles={["recruiter", "admin"]}>
+                <RecruiterDashboard />
+              </RoleRoute>
+            </ProtectedRoute>
+          }
+        />
 
-  /**
-   * Safety:
-   * If token exists but user is missing (e.g., localStorage got cleared partially),
-   * force logout cleanly.
-   */
-  useEffect(() => {
-    if (token && !user) {
-      clearToken();
-      setTokenState(null);
-      setUserState(null);
-    }
-  }, [token, user]);
+        {/* Admin only */}
+        <Route
+          path="/admin"
+          element={
+            <ProtectedRoute>
+              <RoleRoute allowedRoles={["admin"]}>
+                <AdminDashboard />
+              </RoleRoute>
+            </ProtectedRoute>
+          }
+        />
 
-  return token ? (
-  <Dashboard onLogout={handleLogout} user={user} />
-) : (
-  <Login onLogin={handleLogin} />
-);
+        {/* UC-11: System Logs (Admin only) */}
+        <Route
+          path="/admin/logs"
+          element={
+            <ProtectedRoute>
+              <RoleRoute allowedRoles={["admin"]}>
+                <SystemLogs />
+              </RoleRoute>
+            </ProtectedRoute>
+          }
+        />
+
+        {/* Any unknown path goes to Public Jobs */}
+        <Route path="*" element={<Navigate to="/" replace />} />
+
+        <Route
+          path="/recruiter/jobs/:jobId/rankings"
+          element={
+            <ProtectedRoute>
+              <RoleRoute allowedRoles={["recruiter", "admin"]}>
+                <RankingsPage />
+              </RoleRoute>
+            </ProtectedRoute>
+          }
+        />
+
+        <Route
+          path="/recruiter/jobs/:jobId/candidate/:resumeId"
+          element={
+            <ProtectedRoute>
+              <RoleRoute allowedRoles={["recruiter", "admin"]}>
+                <CandidateDetails />
+              </RoleRoute>
+            </ProtectedRoute>
+          }
+        />
+      </Routes>
+    </BrowserRouter>
+  );
 }

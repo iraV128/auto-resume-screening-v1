@@ -202,7 +202,7 @@ router.post("/rank", requireAuth, requireRole("recruiter", "admin"), async (req,
  * Returns ranking list for a job (sorted DESC).
  * ------------------------------------------------------------
  */
-router.get("/rankings/:jobId", (req, res) => {
+router.get("/rankings/:jobId", requireAuth, requireRole("recruiter", "admin"), (req, res) => {
   const jobId = Number(req.params.jobId);
 
   const rows = db
@@ -234,7 +234,7 @@ router.get("/rankings/:jobId", (req, res) => {
  * Great for "View Feedback" button in frontend.
  * ------------------------------------------------------------
  */
-router.get("/feedback/:jobId/:resumeId", (req, res) => {
+router.get("/feedback/:jobId/:resumeId", requireAuth, requireRole("recruiter", "admin"), (req, res) => {
   const jobId = Number(req.params.jobId);
   const resumeId = Number(req.params.resumeId);
 
@@ -274,7 +274,7 @@ router.get("/feedback/:jobId/:resumeId", (req, res) => {
  * If resumeId is given, returns only that resume's feedback.
  * ------------------------------------------------------------
  */
-router.get("/feedback/:jobId", (req, res) => {
+router.get("/feedback/:jobId", requireAuth, requireRole("recruiter", "admin"), (req, res) => {
   const jobId = Number(req.params.jobId);
   const resumeId = req.query.resumeId ? Number(req.query.resumeId) : null;
 
@@ -331,7 +331,7 @@ router.get("/feedback/:jobId", (req, res) => {
  * Also perfect for "proof" screenshots in your report/demo.
  * ------------------------------------------------------------
  */
-router.get("/ranked-feedback/:jobId", (req, res) => {
+router.get("/ranked-feedback/:jobId", requireAuth, requireRole("recruiter", "admin"), (req, res) => {
   const jobId = Number(req.params.jobId);
 
   const rows = db

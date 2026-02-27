@@ -1,18 +1,22 @@
+// backend/routes/jobs.routes.js
 /**
  * ============================================================
- * JOB ROUTES
+ * JOB ROUTES (FR: Job Posting)
  * ------------------------------------------------------------
  * Handles:
- *   - Create job (Protected)
- *   - Get all jobs
+ *  - POST /api/jobs     -> Create a new job (Recruiter/Admin only)
+ *  - GET  /api/jobs     -> List all jobs (Any authenticated user)
  *
- * Stores:
- *   - Job title
- *   - Job description
+ * Why protected?
+ *  - Only logged-in users can see jobs in this prototype
+ *  - RBAC ensures only recruiter/admin can create jobs
  *
- * Purpose:
- *   Jobs are the reference descriptions that resumes
- *   are compared against for ranking.
+ * Logging (FR-13):
+ *  - Logs job creation events for auditing evidence
+ * 
+ * UC-00: Public can browse open jobs
+ * UC-00b: Public can view job details
+ * Recruiter/Admin can create jobs
  * ============================================================
  */
 
@@ -21,88 +25,68 @@ const db = require("../db/database");
 const { logEvent } = require("../services/log.service");
 const { requireAuth, requireRole } = require("../middleware/auth.middleware");
 
-
 /**
- * ============================================================
- * POST /api/jobs
  * ------------------------------------------------------------
- * Creates a new job
- * - Requires valid JWT (requireAuth)
- * - Stores title & description
- * - Logs event (FR-13)
- * ============================================================
+ * GET /api/jobs   (PUBLIC)
+ * - UC-00 Browse Open Jobs
+ * - Anyone can view jobs (no token)
+ * - We return all jobs here (frontend can filter by closing_date)
+ *   If you want ONLY open jobs, add WHERE closing_date >= today.
+ * ------------------------------------------------------------
  */
-router.post("/", requireAuth, requireRole("recruiter", "admin"), (req, res) => {
-  try {
-    // Safe destructuring
-    const { title, description } = req.body || {};
-
-    // Basic validation
-    if (!title || !description) {
-      return res.status(400).json({
-        error: "title and description required"
-      });
-    }
-
-    // Insert job into database
-    const stmt = db.prepare(`
-      INSERT INTO jobs (title, description, createdAt)
-      VALUES (?, ?, ?)
-    `);
-
-    const info = stmt.run(
-      title,
-      description,
-      new Date().toISOString()
-    );
-
-    /**
-     * FR-13 Logging:
-     * Records system activity for auditing
-     */
-    logEvent("JOB_CREATED", "New job created", {
-      jobId: info.lastInsertRowid,
-      title,
-      createdBy: req.user?.id || null  // from JWT
-    });
-
-    return res.json({
-      id: info.lastInsertRowid
-    });
-
-  } catch (err) {
-    console.error("JOB CREATE ERROR:", err);
-
-    return res.status(500).json({
-      error: "Failed to create job"
-    });
-  }
+router.get("/", (req, res) => {
+  const jobs = db.prepare("SELECT * FROM jobs ORDER BY id DESC").all();
+  return res.json(jobs);
 });
 
+/**
+ * ------------------------------------------------------------
+ * GET /api/jobs/:id   (PUBLIC)
+ * - UC-00b View Job Details
+ * ------------------------------------------------------------
+ */
+router.get("/:id", (req, res) => {
+  const { id } = req.params;
+
+  const job = db.prepare("SELECT * FROM jobs WHERE id = ?").get(id);
+
+  if (!job) {
+    return res.status(404).json({ error: "Job not found" });
+  }
+
+  return res.json(job);
+});
 
 /**
- * ============================================================
- * GET /api/jobs
  * ------------------------------------------------------------
- * Returns all jobs
- * (Currently public — can be protected later if needed)
- * ============================================================
+ * POST /api/jobs   (PROTECTED)
+ * - Recruiter/Admin only
+ * ------------------------------------------------------------
  */
 router.post("/", requireAuth, requireRole("recruiter", "admin"), (req, res) => {
-  try {
-    const jobs = db
-      .prepare("SELECT * FROM jobs ORDER BY id DESC")
-      .all();
+  const { title, description, closing_date } = req.body || {};
 
-    return res.json(jobs);
-
-  } catch (err) {
-    console.error("JOB FETCH ERROR:", err);
-
-    return res.status(500).json({
-      error: "Failed to fetch jobs"
-    });
+  // ✅ Your use-cases mention closing date should exist for postings
+  if (!title || !description || !closing_date) {
+    return res.status(400).json({ error: "title, description, closing_date required" });
   }
+
+  const info = db
+    .prepare(
+      `INSERT INTO jobs (title, description, closing_date, createdAt)
+       VALUES (?, ?, ?, ?)`
+    )
+    .run(title, description, closing_date, new Date().toISOString());
+
+  // FR-13 audit log
+  logEvent("JOB_CREATED", "New job created", {
+    jobId: info.lastInsertRowid,
+    title,
+    createdBy: req.user?.id,
+    role: req.user?.role,
+  });
+
+  return res.json({ id: info.lastInsertRowid });
 });
 
 module.exports = router;

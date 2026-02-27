@@ -40,3 +40,26 @@
 .read-the-docs {
   color: #888;
 }
+
+/* ===========================
+   CandidateDetails polish
+   - Match score badges
+   =========================== */
+
+.badge.score-high {
+  border-color: rgba(46, 204, 113, 0.6);
+  background: rgba(46, 204, 113, 0.18);
+  color: #d9ffe9;
+}
+
+.badge.score-medium {
+  border-color: rgba(241, 196, 15, 0.6);
+  background: rgba(241, 196, 15, 0.16);
+  color: #fff3c4;
+}
+
+.badge.score-low {
+  border-color: rgba(231, 76, 60, 0.6);
+  background: rgba(231, 76, 60, 0.16);
+  color: #ffd6d2;
+}
