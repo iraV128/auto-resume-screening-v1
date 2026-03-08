@@ -13,10 +13,15 @@
 
 // Backend base URL (set this in frontend/.env)
 const API_BASE =
-  import.meta.env.VITE_API_BASE || "http://localhost:5050";
+  //import.meta.env.VITE_API_BASE || "http://localhost:5050";
 // Example: VITE_API_BASE="http://localhost:5050"
+  import.meta.env.VITE_API_URL ||
+  "https://auto-resume-screening-api.onrender.com";
 
-export function getToken() {
+
+
+
+  export function getToken() {
   // Read JWT token from localStorage
   return localStorage.getItem("token");
 }
