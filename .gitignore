@@ -1,20 +1,33 @@
-# dependencies
+# Node modules
 node_modules/
-backend/node_modules/
-frontend/node_modules/
 
-# env files
+# Environment variables
 .env
-backend/.env
-frontend/.env
-*.env
+.env.*
 
-# database
-backend/db/*.sqlite
-backend/db/*.db
+# Build folders
+dist/
+build/
 
-# uploads
+# SQLite database (do NOT push)
+backend/db/data.sqlite
+backend/db/data.sqlite-shm
+backend/db/data.sqlite-wal
+
+# Uploads folder
 backend/uploads/
 
-# logs
+# Logs
 *.log
+
+# OS files
+.DS_Store
+Thumbs.db
+
+
+# Database files
+*.sqlite
+
+# Upload folder
+uploads/
+

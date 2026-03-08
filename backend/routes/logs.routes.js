@@ -1,86 +1,107 @@
 // backend/routes/logs.routes.js
-/**
- * ============================================================
- * LOGS ROUTES (FR-13: Logging + Auditing)
- * ------------------------------------------------------------
- * Purpose:
- * - Allows Admin to read audit logs from the database
- * - Used for debugging + evidence screenshots in report
- *
- * Endpoint:
- * - GET /api/logs
- *
- * Optional query params:
- * - eventType=RANKING_DONE   (filter by event type)
- * - limit=50                (max 200 for safety)
- *
- * Security:
- * - Admin only (JWT + RBAC)
- * ============================================================
- */
+// ============================================================
+// SYSTEM LOGS API
+// ------------------------------------------------------------
+// Admin-only monitoring route
+// GET /api/logs -> returns latest logs
+//
+// Locked final rule:
+// - System logs are admin-only
+// - Used for monitoring, audit trail, and final demo evidence
+// ============================================================
 
 const router = require("express").Router();
 const db = require("../db/database");
 const { requireAuth, requireRole } = require("../middleware/auth.middleware");
 
-/**
- * ============================================================
- * GET /api/logs?eventType=...&limit=...
- * ------------------------------------------------------------
- * Returns latest logs (most recent first)
- * - If eventType is provided: returns only that type
- * - limit is capped to 200 to prevent huge responses
- * ============================================================
- */
+// ------------------------------------------------------------
+// Helper: parse stored JSON safely
+// ------------------------------------------------------------
+function parseMeta(meta) {
+  if (meta == null) return null;
+
+  try {
+    return typeof meta === "string" ? JSON.parse(meta) : meta;
+  } catch {
+    return meta;
+  }
+}
+
+// ------------------------------------------------------------
+// GET /api/logs
+// Admin-only
+// Returns latest 200 logs
+// ------------------------------------------------------------
 router.get("/", requireAuth, requireRole("admin"), (req, res) => {
   try {
-    const eventType = req.query.eventType || null;
+    const rows = db
+      .prepare(`
+        SELECT
+          id,
+          action,
+          message,
+          meta,
+          actorUserId,
+          entityType,
+          entityId,
+          ipAddress,
+          userAgent,
+          createdAt
+        FROM logs
+        ORDER BY datetime(createdAt) DESC, id DESC
+        LIMIT 200
+      `)
+      .all();
 
-    // limit defaults to 50, max 200
-    const limit = Math.min(Number(req.query.limit) || 50, 200);
-
-    let rows;
-
-    if (eventType) {
-      rows = db.prepare(`
-        SELECT * FROM logs
-        WHERE eventType = ?
-        ORDER BY createdAt DESC
-        LIMIT ?
-      `).all(eventType, limit);
-    } else {
-      rows = db.prepare(`
-        SELECT * FROM logs
-        ORDER BY createdAt DESC
-        LIMIT ?
-      `).all(limit);
-    }
-
-    /**
-     * Parse meta JSON safely
-     * - meta is stored as JSON string in DB (TEXT)
-     * - return {} if missing or invalid JSON
-     */
-    const formatted = rows.map((r) => ({
-      id: r.id,
-      eventType: r.eventType,
-      message: r.message,
-      meta: (() => {
-        try {
-          return r.meta ? JSON.parse(r.meta) : {};
-        } catch {
-          return {};
-        }
-      })(),
-      createdAt: r.createdAt,
+    const mapped = rows.map((r) => ({
+      ...r,
+      ip: r.ipAddress ?? null, // frontend expects "ip"
+      meta: parseMeta(r.meta),
     }));
 
-    return res.json(formatted);
-
-  } catch (err) {
-    console.error("LOGS FETCH ERROR:", err);
+    return res.json(mapped);
+  } catch (e) {
+    console.error("LOGS GET ERROR:", e);
     return res.status(500).json({ error: "Failed to fetch logs" });
   }
 });
 
+// ------------------------------------------------------------
+// GET /api/logs/stats
+// Optional summary endpoint for admin dashboard/log stats
+// ------------------------------------------------------------
+router.get("/stats", requireAuth, requireRole("admin"), (req, res) => {
+  try {
+    const total = db.prepare(`SELECT COUNT(*) AS count FROM logs`).get()?.count ?? 0;
+
+    const byAction = db
+      .prepare(`
+        SELECT action, COUNT(*) AS count
+        FROM logs
+        GROUP BY action
+        ORDER BY count DESC, action ASC
+        LIMIT 20
+      `)
+      .all();
+
+    const recentErrors = db
+      .prepare(`
+        SELECT COUNT(*) AS count
+        FROM logs
+        WHERE action = 'ERROR'
+      `)
+      .get()?.count ?? 0;
+
+    return res.json({
+      total,
+      recentErrors,
+      byAction,
+    });
+  } catch (e) {
+    console.error("LOGS STATS ERROR:", e);
+    return res.status(500).json({ error: "Failed to fetch log stats" });
+  }
+});
+
+// Must export router directly
 module.exports = router;

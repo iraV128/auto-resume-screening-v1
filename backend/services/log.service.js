@@ -1,37 +1,65 @@
-/**
- * ============================================================
- * Log Service (FR-13)
- * ------------------------------------------------------------
- * Writes audit events into logs table.
- * Logging must NEVER crash the app (try/catch).
- * ============================================================
- */
-
+// backend/services/log.service.js
 const db = require("../db/database");
 
-/**
- * Insert a log event into the database.
- *
- * @param {string} eventType - e.g. JOB_CREATED, RESUME_UPLOADED, RANKING_DONE, ERROR
- * @param {string} message - human readable description
- * @param {object} meta - optional structured metadata (stored as JSON string)
- */
-function logEvent(eventType, message, meta = {}) {
+function writeLog({
+  action,
+  message,
+  meta,
+  entityType,
+  entityId,
+  actorUserId,
+  ipAddress,
+  userAgent,
+}) {
   try {
-    const stmt = db.prepare(
-      "INSERT INTO logs (eventType, message, meta, createdAt) VALUES (?, ?, ?, ?)"
-    );
+    const safeAction = action || "EVENT";
+    const safeMessage = message || "Event recorded";
+    const metaJson = meta ? JSON.stringify(meta) : null;
 
-    stmt.run(
-      eventType,
-      message,
-      JSON.stringify(meta || {}),
-      new Date().toISOString()
+    db.prepare(`
+      INSERT INTO logs (action, message, meta, entityType, entityId, actorUserId, ipAddress, userAgent)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      safeAction,
+      safeMessage,
+      metaJson,
+      entityType || null,
+      entityId || null,
+      actorUserId || null,
+      ipAddress || null,
+      userAgent || null
     );
   } catch (e) {
-    // If logging fails, don't crash the app
     console.error("LOGGING FAILED:", e.message);
   }
 }
 
-module.exports = { logEvent };
+/**
+ * logEvent(action, message, meta, req, actorUserId)
+ * Matches how auth.routes.js is calling it.
+ */
+function logEvent(action, message = "", meta = {}, req = null, actorUserId = null) {
+  const ipAddress =
+    req?.headers?.["x-forwarded-for"]?.toString()?.split(",")?.[0]?.trim() ||
+    req?.ip ||
+    null;
+
+  const userAgent = req?.headers?.["user-agent"] || null;
+
+  // allow meta to carry entity info (optional)
+  const entityType = meta?.entityType ?? null;
+  const entityId = meta?.entityId ?? null;
+
+  writeLog({
+    action,
+    message,
+    meta,
+    entityType,
+    entityId,
+    actorUserId,
+    ipAddress,
+    userAgent,
+  });
+}
+
+module.exports = { writeLog, logEvent };

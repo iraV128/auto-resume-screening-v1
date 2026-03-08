@@ -1,203 +1,149 @@
-/**
- * ============================================================
- * Database Configuration – Automated Resume Screening System
- * ------------------------------------------------------------
- * Uses better-sqlite3 (synchronous & lightweight).
- * Database file: backend/db/data.sqlite
- *
- * All tables are created on server startup using IF NOT EXISTS
- * so existing data is NOT overwritten.
- * ============================================================
- */
+// backend/db/database.js
+// ============================================================
+// Option B Schema: separate rankings + feedback tables
+// Also includes applications table for apply flow.
+// Designed to align routes + stop current DB errors.
+// ============================================================
 
-const Database = require("better-sqlite3");
 const path = require("path");
+const Database = require("better-sqlite3");
+const bcrypt = require("bcryptjs");
 
-// Absolute path to SQLite file
 const dbPath = path.join(__dirname, "data.sqlite");
-
-// Initialize database connection
+console.log("USING DB:", dbPath);
 const db = new Database(dbPath);
 
-/**
- * ============================================================
- * TABLE CREATION
- * ============================================================
- */
-db.exec(`
-/**
- * -------------------------
- * JOBS TABLE
- * Stores job descriptions created by recruiter
- * -------------------------
- */
-CREATE TABLE IF NOT EXISTS jobs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  title TEXT NOT NULL,
-  description TEXT NOT NULL,
-  createdAt TEXT NOT NULL
-);
+db.pragma("journal_mode = WAL");
+db.pragma("foreign_keys = ON");
 
-/**
- * -------------------------
- * RESUMES TABLE
- * Stores uploaded resumes and extracted text
- * -------------------------
- */
-CREATE TABLE IF NOT EXISTS resumes (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  filename TEXT NOT NULL,               -- stored file name (server)
-  originalName TEXT NOT NULL,           -- original uploaded name
-  textContent TEXT NOT NULL,            -- raw extracted text
-  sanitisedTextContent TEXT,            -- PII-stripped text (bias mitigation)
-  createdAt TEXT NOT NULL
-);
+function initDb() {
+  db.transaction(() => {
+    // USERS
+    db.prepare(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT NOT NULL,
+        email TEXT NOT NULL UNIQUE,
+        passwordHash TEXT NOT NULL,
+        role TEXT NOT NULL DEFAULT 'jobseeker'
+          CHECK (role IN ('jobseeker','recruiter','admin')),
+        failedAttempts INTEGER NOT NULL DEFAULT 0,
+        lockUntil INTEGER
+      )
+    `).run();
 
-/**
- * -------------------------
- * RANKINGS TABLE
- * Stores similarity scores between a job and resumes
- * -------------------------
- */
-CREATE TABLE IF NOT EXISTS rankings (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  jobId INTEGER NOT NULL,
-  resumeId INTEGER NOT NULL,
-  score REAL NOT NULL,                  -- raw similarity score
-  scorePercent REAL NOT NULL,           -- score converted to %
-  topTerms TEXT NOT NULL,               -- JSON string of matched keywords
-  createdAt TEXT NOT NULL,
-  FOREIGN KEY(jobId) REFERENCES jobs(id),
-  FOREIGN KEY(resumeId) REFERENCES resumes(id)
-);
+    // JOBS (FR-06)
+    db.prepare(`
+      CREATE TABLE IF NOT EXISTS jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        recruiterId INTEGER,
+        title TEXT NOT NULL,
+        company TEXT NOT NULL,
+        location TEXT NOT NULL,
+        description TEXT NOT NULL,
+        dueDate TEXT NOT NULL,
+        createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (recruiterId) REFERENCES users(id) ON DELETE SET NULL
+      )
+    `).run();
 
-/**
- * -------------------------
- * FEEDBACK TABLE (FR-10)
- * Stores explainable AI candidate feedback
- * -------------------------
- */
-CREATE TABLE IF NOT EXISTS feedback (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  jobId INTEGER NOT NULL,
-  resumeId INTEGER NOT NULL,
-  strengths TEXT NOT NULL,              -- JSON array (matched skills)
-  gaps TEXT NOT NULL,                   -- JSON array (missing skills)
-  summary TEXT NOT NULL,                -- human-readable explanation
-  createdAt TEXT NOT NULL,
-  FOREIGN KEY(jobId) REFERENCES jobs(id),
-  FOREIGN KEY(resumeId) REFERENCES resumes(id)
-);
+    // RESUMES (FR-05 + FR-08 bias mitigation)
+    // Keep BOTH filename and originalName to avoid query mismatches.
+    db.prepare(`
+      CREATE TABLE IF NOT EXISTS resumes (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        userId INTEGER,
+        filename TEXT NOT NULL,
+        originalName TEXT,
+        content TEXT NOT NULL,
+        sanitisedTextContent TEXT,
+        createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (userId) REFERENCES users(id) ON DELETE SET NULL
+      )
+    `).run();
 
-/**
- * -------------------------
- * LOGS TABLE
- * Stores system activity for audit & traceability
- * -------------------------
- */
-CREATE TABLE IF NOT EXISTS logs (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  eventType TEXT NOT NULL,        -- e.g. JOB_CREATED, RESUME_UPLOADED, RANKING_DONE, ERROR
-  message TEXT NOT NULL,          -- human readable log message
-  meta TEXT,                      -- JSON string for structured metadata
-  createdAt TEXT NOT NULL
-);
+    // APPLICATIONS (UC-03 apply flow)
+    db.prepare(`
+      CREATE TABLE IF NOT EXISTS applications (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        jobId INTEGER NOT NULL,
+        userId INTEGER NOT NULL,
+        resumeId INTEGER NOT NULL,
+        status TEXT NOT NULL DEFAULT 'submitted'
+          CHECK (status IN ('submitted','reviewed','shortlisted','rejected')),
+        createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (jobId) REFERENCES jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY (userId) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (resumeId) REFERENCES resumes(id) ON DELETE CASCADE,
+        UNIQUE(jobId, userId)
+      )
+    `).run();
 
-/**
- * -------------------------
- * USERS TABLE (AUTH + JWT + RBAC)
- * Stores user accounts for login, and role for RBAC
- * -------------------------
- * Notes:
- * - password_hash stores bcrypt hash (NEVER store plain password)
- * - role supports RBAC checks: jobseeker / recruiter / admin
- * - createdAt used for auditing and admin reporting
- */
-CREATE TABLE IF NOT EXISTS users (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  username TEXT NOT NULL,
-  email TEXT NOT NULL UNIQUE,
-  password_hash TEXT NOT NULL,
+    // RANKINGS (FR-08/FR-09)
+    db.prepare(`
+      CREATE TABLE IF NOT EXISTS rankings (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        jobId INTEGER NOT NULL,
+        resumeId INTEGER NOT NULL,
+        score REAL NOT NULL,
+        breakdown TEXT,
+        createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (jobId) REFERENCES jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY (resumeId) REFERENCES resumes(id) ON DELETE CASCADE,
+        UNIQUE(jobId, resumeId)
+      )
+    `).run();
 
-  role TEXT NOT NULL DEFAULT 'jobseeker'
-    CHECK(role IN ('jobseeker', 'recruiter', 'admin')),
+    // FEEDBACK (FR-10)
+    db.prepare(`
+      CREATE TABLE IF NOT EXISTS feedback (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        jobId INTEGER NOT NULL,
+        resumeId INTEGER NOT NULL,
+        summary TEXT,
+        strengths TEXT,
+        gaps TEXT,
+        recommendations TEXT,
+        createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (jobId) REFERENCES jobs(id) ON DELETE CASCADE,
+        FOREIGN KEY (resumeId) REFERENCES resumes(id) ON DELETE CASCADE,
+        UNIQUE(jobId, resumeId)
+      )
+    `).run();
 
-  createdAt TEXT NOT NULL DEFAULT (datetime('now'))
-);
+    // LOGS (FR-13) — make inserts impossible to fail
+    // Use actorUserId because your current code has been inserting that.
+    db.prepare(`
+      CREATE TABLE IF NOT EXISTS logs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        action TEXT NOT NULL,
+        message TEXT NOT NULL,
+        meta TEXT,
+        entityType TEXT,
+        entityId INTEGER,
+        actorUserId INTEGER,
+        ipAddress TEXT,
+        userAgent TEXT,
+        createdAt TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY (actorUserId) REFERENCES users(id) ON DELETE SET NULL
+      )
+    `).run();
 
-/**
- * -------------------------
- * INDEXES
- * Improves performance for filtering logs & user lookups
- * -------------------------
- */
-CREATE INDEX IF NOT EXISTS idx_logs_eventType ON logs(eventType);
-CREATE INDEX IF NOT EXISTS idx_logs_createdAt ON logs(createdAt);
+    // Seed admin (demo + marking)
+    const adminExists = db.prepare("SELECT id FROM users WHERE role='admin' LIMIT 1").get();
+    if (!adminExists) {
+      const adminEmail = process.env.SEED_ADMIN_EMAIL || "admin@test.com";
+      const adminPassword = process.env.SEED_ADMIN_PASSWORD || "Admin123!";
+      const hash = bcrypt.hashSync(adminPassword, 10);
 
--- Fast login lookup by email
-CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);
-`);
+      db.prepare(
+        "INSERT INTO users (username, email, passwordHash, role) VALUES (?, ?, ?, 'admin')"
+      ).run("Admin", adminEmail, hash);
 
-/**
- * ============================================================
- * LIGHTWEIGHT MIGRATION SECTION
- * ------------------------------------------------------------
- * If the database already exists, CREATE TABLE will NOT modify
- * existing tables. Therefore we manually check for missing
- * columns and add them safely.
- * ============================================================
- */
-
-try {
-  /**
-   * -------------------------
-   * MIGRATION: resumes.sanitisedTextContent (bias mitigation)
-   * -------------------------
-   */
-  const resumeCols = db.prepare(`PRAGMA table_info(resumes)`).all();
-  const hasSanitised = resumeCols.some((c) => c.name === "sanitisedTextContent");
-
-  // Add column only if missing
-  if (!hasSanitised) {
-    db.exec(`ALTER TABLE resumes ADD COLUMN sanitisedTextContent TEXT;`);
-    console.log("DB MIGRATION: Added resumes.sanitisedTextContent");
-  }
-
-  /**
-   * -------------------------
-   * MIGRATION: users table (Auth + RBAC)
-   * -------------------------
-   * If someone previously created a users table without role/createdAt,
-   * we add missing columns safely here.
-   */
-  const userCols = db.prepare(`PRAGMA table_info(users)`).all();
-
-  // If users table doesn't exist yet, PRAGMA returns [].
-  // In that case, table creation above already handled it.
-  if (userCols.length > 0) {
-    const hasRole = userCols.some((c) => c.name === "role");
-    const hasCreatedAt = userCols.some((c) => c.name === "createdAt");
-
-    if (!hasRole) {
-      // Add role column default jobseeker (RBAC)
-      db.exec(`ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'jobseeker';`);
-      console.log("DB MIGRATION: Added users.role");
+      console.log("✅ Seeded admin:", adminEmail, "/", adminPassword);
     }
-
-    if (!hasCreatedAt) {
-      // Add createdAt column for audit trails
-      db.exec(`ALTER TABLE users ADD COLUMN createdAt TEXT NOT NULL DEFAULT (datetime('now'));`);
-      console.log("DB MIGRATION: Added users.createdAt");
-    }
-
-    // (Optional note) SQLite cannot easily add CHECK constraints via ALTER TABLE.
-    // We enforce allowed roles in app logic + initial CREATE TABLE CHECK above.
-  }
-} catch (e) {
-  console.error("DB MIGRATION ERROR:", e);
+  })();
 }
 
-/**
- * Export database instance for use in routes & services
- */
+initDb();
 module.exports = db;

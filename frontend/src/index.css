@@ -45,6 +45,12 @@ body {
   padding: 16px;
 }
 
+.card:hover {
+  border-color: rgba(255,255,255,0.25);
+  transform: translateY(-2px);
+  transition: all 0.2s ease;
+}
+
 /* Text */
 .muted { color: var(--muted); }
 .error { color: var(--danger); }
@@ -66,21 +72,74 @@ input:focus, textarea:focus, select:focus {
 }
 
 /* Buttons */
-button {
+button,
+.btn,
+a.btn {
   border-radius: 12px;
-  border: 1px solid var(--border);
+  border: 1px solid rgba(255,255,255,0.18);
   padding: 10px 12px;
-  font-weight: 700;
+  font-weight: 600;
   cursor: pointer;
-  background: rgba(255,255,255,0.08);
-  color: var(--text);
+  background: rgba(120, 59, 233, 0.08);
+  color: #ffffff;
+  text-decoration: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  transition: all 0.2s ease;
 }
-button:hover { background: rgba(255,255,255,0.12); }
-button:disabled { opacity: 0.6; cursor: not-allowed; }
 
-.btn-primary { background: var(--brand); border-color: rgba(109,94,252,0.6); }
-.btn-primary:hover { filter: brightness(1.05); }
-.btn-danger { background: rgba(239,68,68,0.16); border-color: rgba(239,68,68,0.30); }
+button:hover,
+.btn:hover,
+a.btn:hover {
+  background: rgba(255,255,255,0.14);
+  border-color: rgba(255,255,255,0.28);
+  transform: translateY(-1px);
+}
+
+button:disabled,
+.btn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+  transform: none;
+}
+
+/* Main purple action buttons */
+.btn-primary {
+  background: linear-gradient(135deg, #5b6cff, #8c5bff);
+  border-color: rgba(140,91,255,0.45);
+  color: #fff;
+}
+
+.btn-primary:hover {
+  background: linear-gradient(135deg, #6d7cff, #9b72ff);
+  border-color: rgba(155,114,255,0.55);
+}
+
+/* Danger buttons */
+.btn-danger {
+  background: rgba(239,68,68,0.16);
+  border-color: rgba(239,68,68,0.30);
+  color: #fff;
+}
+
+.btn-danger:hover {
+  background: rgba(239,68,68,0.24);
+  border-color: rgba(239,68,68,0.42);
+}
+
+/* Secondary outline-style buttons / links */
+.btn-outline {
+  background: transparent;
+  border: 1px solid rgba(255,255,255,0.22);
+  color: #fff;
+}
+
+.btn-outline:hover {
+  background: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.32);
+}
 
 /* Badges */
 .badge {

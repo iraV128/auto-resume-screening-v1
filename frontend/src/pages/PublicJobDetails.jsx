@@ -1,15 +1,8 @@
 // src/pages/PublicJobDetails.jsx
-// ============================================================
-// UC-00b: View Job Details (Public)
-// - No login required
-// - Shows job info + closing date
-// - If deadline passed: show "Application Closed" + disable Apply
-// ============================================================
-
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { apiFetch, getUser } from "../api";
-import AppShell from "../components/Appshell";
+import AppShell from "../components/AppShell";
 
 export default function PublicJobDetails() {
   const { jobId } = useParams();
@@ -23,35 +16,40 @@ export default function PublicJobDetails() {
     async function load() {
       setLoading(true);
       setError("");
+
       try {
         const data = await apiFetch(`/api/jobs/${jobId}`);
         setJob(data);
       } catch (e) {
-        setError(e.message);
+        setError(e?.message || "Failed to load job details.");
       } finally {
         setLoading(false);
       }
     }
+
     load();
   }, [jobId]);
 
-  // Deadline check (UC-00b exception E1)
+  const closingDate = job?.closing_date || job?.closingDate || job?.dueDate || null;
+
   const isClosed = useMemo(() => {
-    if (!job?.closing_date) return false;
-    return new Date(job.closing_date) < new Date();
-  }, [job]);
+    if (!closingDate) return false;
+    return new Date(closingDate) < new Date();
+  }, [closingDate]);
 
   function handleApply() {
-    // UC-03: Apply to job (upload resume)
-    // If not logged in -> redirect to login first
     const user = getUser();
+    const applyPath = `/jobs/${jobId}/apply`;
+
     if (!user) {
-      // After login you can redirect back later (optional improvement)
-      navigate("/login", { replace: true });
+      navigate("/login", {
+        replace: true,
+        state: { from: applyPath },
+      });
       return;
     }
-    // Logged in -> go to upload page
-    navigate(`/jobs/${jobId}/apply`);
+
+    navigate(applyPath);
   }
 
   return (
@@ -69,7 +67,7 @@ export default function PublicJobDetails() {
             </span>
 
             <span className="badge">
-              Closing date: {job.closing_date ? new Date(job.closing_date).toLocaleDateString() : "Not set"}
+              Closing date: {closingDate ? new Date(closingDate).toLocaleDateString() : "Not set"}
             </span>
           </div>
 
@@ -79,15 +77,9 @@ export default function PublicJobDetails() {
 
           <div style={{ height: 14 }} />
 
-          {/* Apply button behaviour from UC-00b exception */}
           <button className="btn-primary" onClick={handleApply} disabled={isClosed}>
             {isClosed ? "Applications Closed" : "Apply / Upload Resume"}
           </button>
-
-          {/* Wireframe: show ethical/bias note */}
-          <div className="muted" style={{ marginTop: 10, fontSize: 13 }}>
-            Personal data will not influence ranking (PII is removed before scoring).
-          </div>
         </div>
       )}
     </AppShell>

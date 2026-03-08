@@ -1,5 +1,23 @@
 // backend/routes/resumes.routes.js
-// FR-13: Logging + Auditing for resume uploads (success + errors)
+// ============================================================
+// RESUME ROUTES
+// ------------------------------------------------------------
+// POST /api/resumes/upload
+// - Candidate uploads PDF/DOCX resume
+// - Max size: 10MB
+// - Extract text
+// - Strip PII for bias mitigation
+// - Store both raw and sanitised text
+//
+// GET /api/resumes
+// - Simple list/debug support
+//
+// Locked checklist rules:
+// - Resume upload should be authenticated
+// - PDF/DOCX only
+// - Max 10MB
+// - Logging + bias-mitigation evidence
+// ============================================================
 
 const { logEvent } = require("../services/log.service");
 const router = require("express").Router();
@@ -7,37 +25,58 @@ const multer = require("multer");
 const path = require("path");
 const fs = require("fs");
 
-// pdf-parse sometimes exports as { default: fn } depending on version
 const pdfParseModule = require("pdf-parse");
 const pdfParse = pdfParseModule.default || pdfParseModule;
 
 const mammoth = require("mammoth");
 const db = require("../db/database");
 
-// ✅ Bias mitigation helper: create sanitisedTextContent (PII stripped)
 const { stripPII } = require("../services/pii.service");
+const { requireAuth, requireRole } = require("../middleware/auth.middleware");
 
-// Ensure uploads folder exists (runtime folder)
 const uploadDir = path.join(__dirname, "..", "uploads");
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
 
-// Save uploaded files to /uploads with a timestamp prefix
+// ------------------------------------------------------------
+// Multer storage
+// ------------------------------------------------------------
 const storage = multer.diskStorage({
   destination: uploadDir,
-  filename: (req, file, cb) => cb(null, Date.now() + "-" + file.originalname),
+  filename: (req, file, cb) => {
+    cb(null, `${Date.now()}-${file.originalname}`);
+  },
 });
 
-const upload = multer({ storage });
+// ------------------------------------------------------------
+// Backend file validation
+// - Accept only PDF / DOC / DOCX
+// - Max size 10MB
+// ------------------------------------------------------------
+function fileFilter(req, file, cb) {
+  const ext = path.extname(file.originalname || "").toLowerCase();
 
-/**
- * Extract text from PDF/DOCX.
- * NOTE: Some PDFs can fail with pdf.js errors (e.g., "bad XRef entry").
- * We handle that gracefully and return a clear message (so app doesn't crash).
- */
+  const allowed = [".pdf", ".doc", ".docx"];
+  if (!allowed.includes(ext)) {
+    return cb(new Error("Only PDF and DOCX files are allowed"));
+  }
+
+  cb(null, true);
+}
+
+const upload = multer({
+  storage,
+  fileFilter,
+  limits: {
+    fileSize: 10 * 1024 * 1024, // 10MB
+  },
+});
+
+// ------------------------------------------------------------
+// Parse uploaded file into plain text
+// ------------------------------------------------------------
 async function parseFileToText(filePath, originalName) {
   const ext = path.extname(originalName).toLowerCase();
 
-  // --- PDF parsing ---
   if (ext === ".pdf") {
     try {
       const dataBuffer = fs.readFileSync(filePath);
@@ -45,110 +84,239 @@ async function parseFileToText(filePath, originalName) {
       return (data.text || "").trim();
     } catch (err) {
       console.error("PDF PARSE ERROR:", err.message);
-      throw new Error("PDF parsing failed (bad XRef). Please upload DOCX instead.");
+      throw new Error("PDF parsing failed. Please upload DOCX instead.");
     }
   }
 
-  // --- DOCX parsing ---
+  // DOCX is the main supported Word format
   if (ext === ".docx") {
     const result = await mammoth.extractRawText({ path: filePath });
     return (result.value || "").trim();
   }
 
-  // Unsupported file type
+  // Keep strict message for unsupported formats
   throw new Error("Only PDF and DOCX supported");
 }
 
-// Upload resume endpoint
-router.post("/upload", upload.single("resume"), async (req, res) => {
-  // Debug line (you can remove later)
-  console.log("UPLOAD ROUTE HIT");
+// ------------------------------------------------------------
+// POST /api/resumes/upload
+// Candidate-only for real apply flow
+// Multer runs before controller logic
+// ------------------------------------------------------------
+router.post(
+  "/upload",
+  requireAuth,
+  requireRole("jobseeker"),
+  (req, res, next) => {
+    upload.single("resume")(req, res, function (err) {
+      if (err instanceof multer.MulterError) {
+        if (err.code === "LIMIT_FILE_SIZE") {
+          return res.status(400).json({ error: "Resume must be 10MB or smaller" });
+        }
+        return res.status(400).json({ error: err.message || "Upload failed" });
+      }
 
-  try {
-    const file = req.file;
-    if (!file) return res.status(400).json({ error: "No file uploaded" });
+      if (err) {
+        return res.status(400).json({ error: err.message || "Invalid file upload" });
+      }
 
-    // 1) Parse file into raw text (PDF/DOCX)
-    const textContent = await parseFileToText(file.path, file.originalname);
-    if (!textContent.trim()) {
-      return res.status(400).json({ error: "Could not extract text" });
+      next();
+    });
+  },
+  async (req, res) => {
+    try {
+      const file = req.file;
+      if (!file) {
+        return res.status(400).json({ error: "No file uploaded" });
+      }
+
+      // Extract text from file
+      const textContent = await parseFileToText(file.path, file.originalname);
+
+      if (!textContent.trim()) {
+        return res.status(400).json({ error: "Could not extract text from resume" });
+      }
+
+      // Strip PII before ranking
+      const sanitisedTextContent = stripPII(textContent);
+
+      // Bias mitigation stats for evidence/logging
+      const rawLen = textContent.length;
+      const cleanLen = sanitisedTextContent.length;
+      const reductionChars = Math.max(0, rawLen - cleanLen);
+      const reductionPct =
+        rawLen > 0
+          ? Number(((reductionChars / rawLen) * 100).toFixed(2))
+          : 0;
+
+      const userId = req.user?.id ?? null;
+
+      // Save resume
+      const stmt = db.prepare(`
+        INSERT INTO resumes (
+          userId,
+          filename,
+          originalName,
+          content,
+          sanitisedTextContent,
+          createdAt
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+      `);
+
+      const info = stmt.run(
+        userId,
+        file.filename,
+        file.originalname,
+        textContent,
+        sanitisedTextContent,
+        new Date().toISOString()
+      );
+
+      const resumeId = info.lastInsertRowid;
+
+      // Audit log: upload
+      logEvent(
+        "RESUME_UPLOADED",
+        "Resume uploaded",
+        {
+          entityType: "resume",
+          entityId: resumeId,
+          originalName: file.originalname,
+          filename: file.filename,
+          userId,
+        },
+        req,
+        userId
+      );
+
+      // Audit log: PII stripping / bias mitigation
+      logEvent(
+        "BIAS_MITIGATION_APPLIED",
+        "PII stripped and sanitised text stored",
+        {
+          entityType: "resume",
+          entityId: resumeId,
+          rawLen,
+          cleanLen,
+          reductionChars,
+          reductionPct,
+        },
+        req,
+        userId
+      );
+
+      return res.json({
+        id: resumeId,
+        originalName: file.originalname,
+        message: "Resume uploaded successfully",
+      });
+    } catch (e) {
+      console.error("UPLOAD ERROR:", e);
+
+      logEvent(
+        "ERROR",
+        e.message,
+        { entityType: "resume", route: "resumes/upload" },
+        req,
+        req.user?.id ?? null
+      );
+
+      return res.status(500).json({ error: e.message || "Resume upload failed" });
     }
-
-    // ✅ 2) Step 3: Create sanitised text (PII stripped) and store it
-    const sanitisedTextContent = stripPII(textContent);
-
-    // ✅ Step 4: Calculate safe proof metrics (NO sensitive content logged)
-    // We only log lengths + reduction %, which proves bias mitigation ran.
-    const rawLen = textContent.length;
-    const cleanLen = sanitisedTextContent.length;
-    const reductionChars = Math.max(0, rawLen - cleanLen);
-    const reductionPct =
-      rawLen > 0 ? Number(((reductionChars / rawLen) * 100).toFixed(2)) : 0;
-
-    // ✅ 3) Save resume record in SQLite (store BOTH raw + sanitised)
-    const stmt = db.prepare(`
-      INSERT INTO resumes (filename, originalName, textContent, sanitisedTextContent, createdAt)
-      VALUES (?, ?, ?, ?, ?)
-    `);
-
-    const info = stmt.run(
-      file.filename,
-      file.originalname,
-      textContent,
-      sanitisedTextContent,
-      new Date().toISOString()
-    );
-
-    // ✅ FR-13: Log successful resume upload (auditable event)
-    logEvent("RESUME_UPLOADED", "Resume uploaded", {
-      resumeId: info.lastInsertRowid,
-      originalName: file.originalname,
-      filename: file.filename,
-      sanitisedStored: true, // evidence flag (doesn't leak PII)
-    });
-
-    // ✅ Step 4: Proof log — bias mitigation applied
-    // This is the main evidence you can cite in your report/demo.
-    logEvent("BIAS_MITIGATION_APPLIED", "PII stripped and sanitised text stored", {
-      resumeId: info.lastInsertRowid,
-      rawLen,
-      cleanLen,
-      reductionChars,
-      reductionPct,
-    });
-
-    res.json({ id: info.lastInsertRowid, originalName: file.originalname });
-  } catch (e) {
-    console.error("UPLOAD ERROR:", e);
-
-    // ✅ FR-13: Log error events (auditable failures)
-    logEvent("ERROR", e.message, { route: "resumes/upload" });
-
-    res.status(500).json({ error: e.message });
   }
-});
+);
 
-// List uploaded resumes
-router.get("/", (req, res) => {
+// ------------------------------------------------------------
+// GET /api/resumes
+// Simple list for testing/debug
+// ------------------------------------------------------------
+router.get("/", requireAuth, (req, res) => {
   const rows = db
     .prepare("SELECT id, originalName, createdAt FROM resumes ORDER BY id DESC")
     .all();
+
   res.json(rows);
 });
 
-// Debug: check stored raw vs sanitised lengths
-router.get("/debug/:id", (req, res) => {
-  const row = db.prepare(`
-    SELECT
-      id,
-      originalName,
-      LENGTH(textContent) AS rawLen,
-      LENGTH(sanitisedTextContent) AS cleanLen
-    FROM resumes
-    WHERE id = ?
-  `).get(req.params.id);
+// ------------------------------------------------------------
+// GET /api/resumes/debug/:id
+// Debug helper for raw vs sanitised text lengths
+// ------------------------------------------------------------
+router.get("/debug/:id", requireAuth, (req, res) => {
+  const row = db
+    .prepare(`
+      SELECT id, originalName,
+        LENGTH(content) AS rawLen,
+        LENGTH(sanitisedTextContent) AS cleanLen
+      FROM resumes
+      WHERE id = ?
+    `)
+    .get(req.params.id);
 
-  res.json(row);
+  res.json(row || null);
+});
+
+// ------------------------------------------------------------
+// GET /api/resumes/:id/download
+// Recruiter/Admin can download a resume file
+// Candidate can only download their own resume
+// ------------------------------------------------------------
+router.get("/:id/download", requireAuth, (req, res) => {
+  try {
+    const resumeId = Number(req.params.id);
+
+    if (!Number.isFinite(resumeId)) {
+      return res.status(400).json({ error: "Invalid resume id" });
+    }
+
+    const resume = db
+      .prepare(`
+        SELECT id, userId, filename, originalName
+        FROM resumes
+        WHERE id = ?
+      `)
+      .get(resumeId);
+
+    if (!resume) {
+      return res.status(404).json({ error: "Resume not found" });
+    }
+
+    // Access rules:
+    // - recruiter/admin can download
+    // - candidate/jobseeker can only download their own resume
+    if (req.user.role === "jobseeker" && Number(resume.userId) !== Number(req.user.id)) {
+      return res.status(403).json({ error: "You do not have permission to access this resume" });
+    }
+
+    if (!["jobseeker", "recruiter", "admin"].includes(req.user.role)) {
+      return res.status(403).json({ error: "Forbidden" });
+    }
+
+    const filePath = path.join(uploadDir, resume.filename);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: "Resume file is missing from storage" });
+    }
+
+    // Optional audit log
+    logEvent(
+      "RESUME_DOWNLOADED",
+      "Resume downloaded",
+      {
+        entityType: "resume",
+        entityId: resume.id,
+        originalName: resume.originalName,
+      },
+      req,
+      req.user?.id ?? null
+    );
+
+    return res.download(filePath, resume.originalName || resume.filename);
+  } catch (e) {
+    console.error("RESUME DOWNLOAD ERROR:", e);
+    return res.status(500).json({ error: "Failed to download resume" });
+  }
 });
 
 module.exports = router;

@@ -1,22 +1,28 @@
 // src/pages/recruiter/CandidateDetails.jsx
 // ============================================================
-// Wireframe 7: Candidate Details + Feedback (Recruiter/Admin)
-// - Shows strengths/gaps/summary (FR-10)
-// - Shows transparency panel (top terms + score)
-// - Uses GET /api/analysis/feedback/:jobId/:resumeId
+// CANDIDATE DETAILS + FEEDBACK
+// ------------------------------------------------------------
+// Recruiter/Admin page
+// - Shows strengths, gaps, and summary (FR-10)
+// - Shows score + transparency panel
+// - Lets recruiter download the uploaded resume
+// - Uses:
+//   GET /api/analysis/feedback/:jobId/:resumeId
+//   GET /api/analysis/rankings/:jobId
+//   GET /api/resumes/:id/download
 // ============================================================
 
 import { useEffect, useState } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import AppShell from "../../components/Appshell";
-import { apiFetch } from "../../api";
+import AppShell from "../../components/AppShell";
+import { apiFetch, getToken } from "../../api";
 
 export default function CandidateDetails() {
   const { jobId, resumeId } = useParams();
   const navigate = useNavigate();
 
   const [feedback, setFeedback] = useState(null);
-  const [rankingRow, setRankingRow] = useState(null); // for score/topTerms
+  const [rankingRow, setRankingRow] = useState(null); // holds score + topTerms
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
@@ -26,17 +32,27 @@ export default function CandidateDetails() {
       setError("");
 
       try {
-        // 1) Feedback for this resume
-        const f = await apiFetch(`/api/analysis/feedback/${jobId}/${resumeId}`);
-        setFeedback(f);
-
-        // 2) Pull ranking list and find this resume (simple approach)
-        // If you want, we can add a dedicated endpoint later: /rankings/:jobId/:resumeId
         const rankings = await apiFetch(`/api/analysis/rankings/${jobId}`);
-        const row = (rankings || []).find((x) => Number(x.resumeId) === Number(resumeId));
+        const row = (rankings || []).find(
+          (x) => Number(x.resumeId) === Number(resumeId)
+        );
+
         setRankingRow(row || null);
+
+        try {
+          const f = await apiFetch(`/api/analysis/feedback/${jobId}/${resumeId}`);
+          setFeedback(f);
+        } catch {
+          // Rankings exist, but feedback is missing
+          setFeedback({
+            resumeName: row?.resumeName || `Resume ${resumeId}`,
+            strengths: [],
+            gaps: [],
+            summary: "Feedback has not been generated yet for this candidate.",
+          });
+        }
       } catch (e) {
-        setError(e.message);
+        setError(e?.message || "Failed to load candidate details.");
       } finally {
         setLoading(false);
       }
@@ -45,12 +61,61 @@ export default function CandidateDetails() {
     load();
   }, [jobId, resumeId]);
 
-    // ✅ UI helper: choose badge color based on score (HD polish)
-    function getScoreClass(score) {
+  function getScoreClass(score) {
     if (score >= 70) return "score-high";
     if (score >= 40) return "score-medium";
     return "score-low";
+  }
+
+  const scoreValue =
+    rankingRow?.scorePercent != null
+      ? Math.round(Number(rankingRow.scorePercent || 0))
+      : null;
+
+  const topTerms = Array.isArray(rankingRow?.topTerms)
+    ? rankingRow.topTerms
+    : [];
+
+  const [downloadError, setDownloadError] = useState("");
+
+  async function handleDownloadResume() {
+  try {
+    setDownloadError("");
+
+    const token = getToken();
+    const apiBase = import.meta.env.VITE_API_URL || "http://localhost:5050";
+
+    const res = await fetch(`${apiBase}/api/resumes/${resumeId}/download`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    if (!res.ok) {
+      let message = "Failed to download resume.";
+      try {
+        const data = await res.json();
+        message = data?.error || message;
+      } catch {}
+      throw new Error(message);
     }
+
+    const blob = await res.blob();
+    const url = window.URL.createObjectURL(blob);
+
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = feedback?.resumeName || `resume-${resumeId}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+
+    window.URL.revokeObjectURL(url);
+  } catch (e) {
+    setDownloadError(e?.message || "Failed to download resume.");
+  }
+}
 
   return (
     <AppShell
@@ -66,18 +131,24 @@ export default function CandidateDetails() {
 
       {!loading && !error && feedback && (
         <div className="grid dashboard-2col">
-          {/* Left: Feedback */}
           <div className="card">
-            <h3>{feedback.resumeName}</h3>
+            <h3>{feedback.resumeName || `Resume ${resumeId}`}</h3>
 
-            {/* Match Score */}
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 10 }}>
+            <div
+              style={{
+                display: "flex",
+                gap: 10,
+                flexWrap: "wrap",
+                marginTop: 10,
+              }}
+            >
               <span className="badge badge-ok">PII Removed</span>
-              {rankingRow?.scorePercent != null && (
-                <span className={`badge ${getScoreClass(Math.round(rankingRow.scorePercent))}`}>
-                    Match Score: {Math.round(rankingRow.scorePercent)}%
+
+              {scoreValue != null && (
+                <span className={`badge ${getScoreClass(scoreValue)}`}>
+                  Match Score: {scoreValue}%
                 </span>
-                 )}    
+              )}
             </div>
 
             <div style={{ height: 12 }} />
@@ -85,7 +156,9 @@ export default function CandidateDetails() {
             <h3 style={{ marginTop: 0 }}>✅ Strengths</h3>
             <ul>
               {(feedback.strengths || []).map((s, idx) => (
-                <li key={idx} className="muted">{s}</li>
+                <li key={idx} className="muted">
+                  {s}
+                </li>
               ))}
               {(feedback.strengths || []).length === 0 && (
                 <li className="muted">No strengths generated.</li>
@@ -95,7 +168,9 @@ export default function CandidateDetails() {
             <h3>⚠ Gaps</h3>
             <ul>
               {(feedback.gaps || []).map((g, idx) => (
-                <li key={idx} className="muted">{g}</li>
+                <li key={idx} className="muted">
+                  {g}
+                </li>
               ))}
               {(feedback.gaps || []).length === 0 && (
                 <li className="muted">No gaps generated.</li>
@@ -108,12 +183,11 @@ export default function CandidateDetails() {
             </div>
           </div>
 
-          {/* Right: Explainability / Transparency */}
           <div className="grid">
             <div className="card">
               <h3>🔎 Transparency</h3>
               <div className="muted" style={{ fontSize: 13 }}>
-                Explains why the score was produced (TF-IDF top terms).
+                Explains why the score was produced using ranking evidence.
               </div>
 
               <div style={{ height: 10 }} />
@@ -124,15 +198,17 @@ export default function CandidateDetails() {
                 </div>
 
                 <div style={{ marginTop: 8 }}>
-                  {rankingRow?.scorePercent != null && (
-                    <span
-                        className={`badge ${getScoreClass(
-                        Math.round(rankingRow.scorePercent)
-                        )}`}
-                    >
-                        Match Score: {Math.round(rankingRow.scorePercent)}%
+                  {scoreValue != null && (
+                    <span className={`badge ${getScoreClass(scoreValue)}`}>
+                      Match Score: {scoreValue}%
                     </span>
-                    )}
+                  )}
+                </div>
+
+                <div className="muted" style={{ marginTop: 10 }}>
+                  {topTerms.length > 0
+                    ? topTerms.join(", ")
+                    : "No top terms available."}
                 </div>
               </div>
 
@@ -142,13 +218,25 @@ export default function CandidateDetails() {
               </div>
             </div>
 
-            {/* Simple chart placeholder (Wireframe 7) */}
             <div className="card">
-              <h3>📊 Visual Match (Placeholder)</h3>
-              <div className="muted" style={{ fontSize: 13 }}>
-                (Optional enhancement) Replace this box later with a bar chart or radar chart.
+              <h3>📄 Resume Access</h3>
+              <div className="muted" style={{ fontSize: 13, marginBottom: 10 }}>
+                Recruiters can download the uploaded resume to manually review the candidate.
               </div>
-              <div style={{ height: 120 }} />
+
+              <div className="muted" style={{ marginBottom: 12 }}>
+                File: <b>{feedback.resumeName || `Resume ${resumeId}`}</b>
+              </div>
+
+              <button className="btn" onClick={handleDownloadResume}>
+                Download Resume
+              </button>
+              
+              {downloadError && (
+                <div className="error" style={{ marginTop: 10 }}>
+                  {downloadError}
+                </div>
+              )}
             </div>
           </div>
         </div>

@@ -1,21 +1,30 @@
 // src/components/ProtectedRoute.jsx
 // ------------------------------------------------------------
-// Protects a route by checking only authentication.
-// ✅ If token exists -> allow access
-// ❌ If token missing -> redirect to /login
+// Purpose:
+// - Blocks protected pages if user is not logged in
+// Rule:
+// - No token -> redirect to /login
+// - Preserve original route so login can redirect back
 // ------------------------------------------------------------
 
-import { Navigate } from "react-router-dom";
+import { Navigate, useLocation } from "react-router-dom";
 import { getToken } from "../api";
 
 export default function ProtectedRoute({ children }) {
   const token = getToken();
+  const location = useLocation();
 
-  // Not logged in
+  // Not logged in -> send to login and remember attempted route
   if (!token) {
-    return <Navigate to="/login" replace />;
+    return (
+      <Navigate
+        to="/login"
+        replace
+        state={{ from: location.pathname + location.search }}
+      />
+    );
   }
 
-  // Logged in -> show the page/component
+  // Logged in -> allow page
   return children;
 }

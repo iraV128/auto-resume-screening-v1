@@ -12,6 +12,7 @@
  */
 
 const db = require("../db/database");
+const { logEvent } = require("./log.service"); //  use shared log service (action-based)
 
 /**
  * Simple stopword list to reduce noise.
@@ -83,18 +84,6 @@ function safeJsonParse(value, fallback) {
 }
 
 /**
- * Insert a log event for traceability (nice for marks).
- */
-function logEvent(eventType, message, metaObj = null) {
-  const createdAt = new Date().toISOString();
-  const meta = metaObj ? JSON.stringify(metaObj) : null;
-
-  db.prepare(
-    `INSERT INTO logs (eventType, message, meta, createdAt) VALUES (?, ?, ?, ?)`
-  ).run(eventType, message, meta, createdAt);
-}
-
-/**
  * Create (or replace) feedback for a job + resume.
  * If feedback already exists for the same pair, we overwrite it (clean + deterministic).
  */
@@ -127,18 +116,22 @@ function saveFeedback({ jobId, resumeId, strengths, gaps, summary }) {
  * Options:
  * - scorePercent: include in summary (optional)
  * - topTermsJson: use ranking explainability terms if you have them (optional)
+ *
+ * NEW (optional):
+ * - req: Express req (so logs can store ip/userAgent)
+ * - actorUserId: for logs.actorUserId (if you want to force it)
  */
 function generateFeedbackForPair(jobId, resumeId, options = {}) {
   const job = db.prepare(`SELECT id, title, description FROM jobs WHERE id = ?`).get(jobId);
   if (!job) throw new Error(`Job not found: ${jobId}`);
 
   const resume = db
-    .prepare(`SELECT id, originalName, textContent, sanitisedTextContent FROM resumes WHERE id = ?`)
+    .prepare(`SELECT id, originalName, content, sanitisedTextContent FROM resumes WHERE id = ?`)
     .get(resumeId);
   if (!resume) throw new Error(`Resume not found: ${resumeId}`);
 
   // Prefer bias-mitigated text if available
-  const resumeText = resume.sanitisedTextContent || resume.textContent;
+  const resumeText = resume.sanitisedTextContent || resume.content;
 
   // Extract keywords
   const jobCounts = keywordCounts(job.description);
@@ -176,8 +169,12 @@ function generateFeedbackForPair(jobId, resumeId, options = {}) {
 
   const summaryParts = [
     `Feedback for "${resume.originalName}" against job "${job.title}".`,
-    strengths.length ? `Key strengths match: ${strengths.slice(0, 5).join(", ")}.` : `No strong keyword matches found (based on extracted terms).`,
-    gaps.length ? `Potential gaps to address: ${gaps.slice(0, 5).join(", ")}.` : `No major gaps detected from top job keywords.`,
+    strengths.length
+      ? `Key strengths match: ${strengths.slice(0, 5).join(", ")}.`
+      : `No strong keyword matches found (based on extracted terms).`,
+    gaps.length
+      ? `Potential gaps to address: ${gaps.slice(0, 5).join(", ")}.`
+      : `No major gaps detected from top job keywords.`,
   ];
 
   if (scorePercent !== null) {
@@ -188,10 +185,21 @@ function generateFeedbackForPair(jobId, resumeId, options = {}) {
 
   const saved = saveFeedback({ jobId, resumeId, strengths, gaps, summary });
 
+  // ✅ FIX: Use action-based logging service (NOT eventType column)
   logEvent(
     "FEEDBACK_GENERATED",
     `Generated feedback for jobId=${jobId}, resumeId=${resumeId}`,
-    { jobId, resumeId, strengthsCount: strengths.length, gapsCount: gaps.length, scorePercent }
+    {
+      entityType: "feedback",
+      entityId: saved.id,
+      jobId,
+      resumeId,
+      strengthsCount: strengths.length,
+      gapsCount: gaps.length,
+      scorePercent,
+    },
+    options.req ?? null,
+    options.actorUserId ?? null
   );
 
   return saved;

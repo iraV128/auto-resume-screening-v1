@@ -1,157 +1,150 @@
 // src/pages/recruiter/RecruiterDashboard.jsx
-// ============================================================
-// Wireframe 3: Recruiter Dashboard (SME usability)
-// Must include 4 panels + metrics cards:
-// - Active Jobs
-// - Applications Received
-// - Quick Actions (Create Job / Analyse Now)
-// - Summary Analytics (Total apps, Avg score, Top skill, Analysis time)
-// ============================================================
-
-import AppShell from "../../components/Appshell";
-import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useMemo, useState } from "react";
+import { Link, useLocation } from "react-router-dom";
+import AppShell from "../../components/AppShell";
 import { apiFetch } from "../../api";
 
-export default function RecruiterDashboard() {
-  // NOTE: For now UI-only (design first).
-  // Next step we wire real numbers via API endpoints.
-// Quick fix: hardcode jobId for now (later we make dropdown)
-const selectedJobId = 1;
+const LS_LAST_ANALYSIS = "recruiter:lastAnalysis";
 
-const [running, setRunning] = useState(false);
-const [msg, setMsg] = useState("");
-const navigate = useNavigate();
 
-async function handleAnalyseNow() {
-  setRunning(true);
-  setMsg("");
-
+function readLastAnalysis() {
   try {
-    // Calls backend: POST /api/analysis/rank
-    await apiFetch("/api/analysis/rank", {
-      method: "POST",
-      body: { jobId: selectedJobId },
-    });
-
-    // After ranking, go straight to Rankings page (Wireframe 6)
-    navigate(`/recruiter/jobs/${selectedJobId}/rankings`);
-  } catch (e) {
-    setMsg(e.message);
-  } finally {
-    setRunning(false);
+    const raw = localStorage.getItem(LS_LAST_ANALYSIS);
+    return raw ? JSON.parse(raw) : null;
+  } catch {
+    return null;
   }
 }
 
+function formatMs(ms) {
+  if (!ms || ms <= 0) return "—";
+  if (ms < 1000) return `${ms} ms`;
+  return `${Math.round(ms / 100) / 10} s`;
+}
+
+function formatRelative(iso) {
+  if (!iso) return "—";
+  const t = new Date(iso).getTime();
+  if (Number.isNaN(t)) return "—";
+  const diff = Date.now() - t;
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return "just now";
+  if (mins < 60) return `${mins} min ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs} hr ago`;
+  return `${Math.floor(hrs / 24)} day(s) ago`;
+}
+
+export default function RecruiterDashboard() {
+  const location = useLocation();
+  const redirectMessage = location.state?.message || "";
+
+  const [loading, setLoading] = useState(true);
+  const [metrics, setMetrics] = useState({
+    totalApplications: 0,
+    avgMatchScore: null,
+    topSkill: null,
+    newCount: 0,
+    pendingCount: 0,
+  });
+
+  const [lastAnalysis, setLastAnalysis] = useState(readLastAnalysis());
+
+  useEffect(() => {
+    const onStorage = (e) => {
+      if (e.key === LS_LAST_ANALYSIS) setLastAnalysis(readLastAnalysis());
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  useEffect(() => {
+    let alive = true;
+
+    async function load() {
+      setLoading(true);
+
+      try {
+        const d = await apiFetch("/api/jobs/recruiter/metrics");
+
+        if (!alive) return;
+
+        setMetrics({
+          totalApplications: Number(d.totalApplications ?? 0),
+          avgMatchScore:
+            d.avgMatchScore === null || d.avgMatchScore === undefined
+              ? null
+              : Number(d.avgMatchScore),
+          topSkill: Array.isArray(d.topSkills) && d.topSkills.length > 0 ? d.topSkills[0].term : null,
+          newCount: Number(d.newApplications ?? 0),
+          pendingCount: Number(d.pendingAnalysis ?? 0),
+        });
+      } catch {
+        if (!alive) return;
+        setMetrics({
+          totalApplications: 0,
+          avgMatchScore: null,
+          topSkill: null,
+          newCount: 0,
+          pendingCount: 0,
+        });
+      } finally {
+        if (alive) setLoading(false);
+      }
+    }
+
+    load();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const avgMatchScoreText = useMemo(() => {
+    if (metrics.avgMatchScore === null || Number.isNaN(metrics.avgMatchScore)) return "—";
+    return `${Math.round(metrics.avgMatchScore)}%`;
+  }, [metrics.avgMatchScore]);
 
   return (
-    <AppShell
-      title="Recruiter Dashboard"
-      subtitle="Create jobs, review applications, analyse resumes, and view explainable rankings."
-    >
-      {/* Top metric cards (visual polish for HD marking) */}
-      <div className="grid dashboard-4cards">
+    <AppShell title="Recruiter Dashboard" subtitle="Overview of your jobs, applications, and analysis performance.">
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
+        <Link className="btn" to="/recruiter/jobs">Create / Manage Jobs</Link>
+        <Link className="btn" to="/recruiter/jobs">Analyse Jobs</Link>
+      </div>
+
+      {redirectMessage && (
+        <div
+          className="card"
+          style={{
+            marginBottom: 12,
+            border: "1px solid rgba(255,255,255,0.18)"
+          }}
+        >
+          <div style={{ fontWeight: 800, marginBottom: 6 }}>Notice</div>
+          <div className="muted">{redirectMessage}</div>
+        </div>
+      )}
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12 }}>
         <div className="card">
           <div className="muted">Total Applications</div>
-          <h2 style={{ marginTop: 6 }}>—</h2>
-          <div className="muted" style={{ fontSize: 12 }}>Across all active jobs</div>
+          <div style={{ fontSize: 28, fontWeight: 900 }}>{loading ? "…" : metrics.totalApplications}</div>
         </div>
 
         <div className="card">
           <div className="muted">Avg Match Score</div>
-          <h2 style={{ marginTop: 6 }}>—</h2>
-          <div className="muted" style={{ fontSize: 12 }}>Shows ranking quality</div>
+          <div style={{ fontSize: 28, fontWeight: 900 }}>{loading ? "…" : avgMatchScoreText}</div>
         </div>
 
         <div className="card">
           <div className="muted">Top Skill Frequency</div>
-          <h2 style={{ marginTop: 6 }}>—</h2>
-          <div className="muted" style={{ fontSize: 12 }}>Most common skill found</div>
+          <div style={{ fontSize: 22, fontWeight: 900 }}>{loading ? "…" : metrics.topSkill || "—"}</div>
         </div>
 
         <div className="card">
           <div className="muted">Analysis Time</div>
-          <h2 style={{ marginTop: 6 }}>—</h2>
-          <div className="muted" style={{ fontSize: 12 }}>Performance (NFR)</div>
+          <div style={{ fontSize: 22, fontWeight: 900 }}>{formatMs(lastAnalysis?.durationMs)}</div>
+          <div className="muted">Last analysed: {formatRelative(lastAnalysis?.atISO)}</div>
         </div>
-      </div>
-
-      <div style={{ height: 12 }} />
-
-      {/* 2-column dashboard panels */}
-      <div className="grid dashboard-2col">
-        {/* Panel 1: Active Jobs */}
-        <div className="card">
-          <h3>📌 Active Jobs</h3>
-          <div className="muted" style={{ fontSize: 13 }}>
-            Shows jobs that are open (closing date not passed).
-          </div>
-
-          <div style={{ height: 10 }} />
-
-          {/* Placeholder list (we will wire /api/jobs next) */}
-          <div className="muted">No jobs loaded yet (UI ready).</div>
-        </div>
-
-        {/* Right column: Quick actions + Applications summary */}
-        <div className="grid">
-          {/* Panel 2: Applications Received */}
-          <div className="card">
-            <h3>📥 Applications Received</h3>
-            <div className="muted" style={{ fontSize: 13 }}>
-              Total resumes submitted to your jobs.
-            </div>
-            <div style={{ marginTop: 10 }}>
-              <span className="badge">New: —</span>{" "}
-              <span className="badge">Pending analysis: —</span>
-            </div>
-          </div>
-
-          {/* Panel 3: Quick Actions */}
-          <div className="card">
-            <h3>⚙ Quick Actions</h3>
-            <div className="grid">
-                {/* Create Job button (leave as UI only for now) */}
-                <button className="btn-primary">
-                    + Create Job
-                </button>
-                {/* Analyse Now button (CONNECTED to backend ranking) */}
-                <button
-                    onClick={handleAnalyseNow}
-                    disabled={running}
-                    className="btn-secondary"
-                >
-                    {running ? "Analysing..." : "Analyse Now"}
-                </button>
-
-                {/* Error message if ranking fails */}
-                {msg && (
-                    <div className="error" style={{ marginTop: 8 }}>
-                    {msg}
-                    </div>
-                )}
-            </div>
-            <div className="muted" style={{ fontSize: 12, marginTop: 10 }}>
-              Tip: “Analyse Now” runs TF-IDF scoring + logs ranking events.
-            </div>
-          </div>
-
-          {/* Panel 4: Summary Analytics */}
-          <div className="card">
-            <h3>📊 Summary Analytics</h3>
-            <div className="muted" style={{ fontSize: 13 }}>
-              Visual summary supports explainability and SME usability.
-            </div>
-
-            {/* Placeholder chart blocks (later we can add real charts) */}
-            <div style={{ height: 10 }} />
-            <div className="card" style={{ padding: 10 }}>
-              <div className="muted" style={{ fontSize: 12 }}>Top 10 Skills (bar chart placeholder)</div>
-              <div style={{ height: 80 }} />
-            </div>
-          </div>
-        </div>
-        
       </div>
     </AppShell>
   );

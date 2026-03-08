@@ -1,255 +1,198 @@
 // backend/routes/analysis.routes.js
-/**
- * ============================================================
- * Analysis & Ranking Routes
- * What it does:
-
-Gets job description
-Gets resumes
-Uses rank.service.js
-Stores ranking score in DB
-Logs event (FR-13)
-Generates feedback (FR-10)
-
-* ------------------------------------------------------------
- * Endpoints:
- * - POST /api/analysis/rank
- *      -> ranks all resumes for a job (TF-IDF via Node -> Python)
- *      -> generates FR-10 candidate feedback for each resume
- *
- * - GET  /api/analysis/rankings/:jobId
- *      -> returns ranking list for a job (sorted DESC)
- *
- * - GET  /api/analysis/feedback/:jobId
- *      -> returns feedback for ALL resumes in a job
- *      -> optional: ?resumeId=#
- *
- * - GET  /api/analysis/feedback/:jobId/:resumeId  
- *      -> returns feedback for ONE resume (frontend-friendly)
- *
- * - GET  /api/analysis/ranked-feedback/:jobId      
- *      -> returns rankings + feedback combined in one response (best proof/demo)
- *
- * FR-13: Logging + Auditing (START, DONE, ERROR + bias mitigation proof logs)
- * FR-10: Candidate Feedback Generation (strengths/gaps/summary stored in DB)
- *
- * Notes:
- * - Timing logs measure duration; they do NOT speed up ranking.
- * - Bias mitigation uses sanitised text when available (fallback to stripPII).
- * ============================================================
- */
+// ============================================================
+// ANALYSIS / RANKING ROUTES
+// Aligned to database.js schema:
+// resumes(content, sanitisedTextContent)
+// rankings(score, breakdown)
+// feedback(summary, strengths, gaps, recommendations)
+// ============================================================
 
 const router = require("express").Router();
 const db = require("../db/database");
-
 const { requireAuth, requireRole } = require("../middleware/auth.middleware");
-
 const { scoreWithTfidf } = require("../services/rank.service");
-const { logEvent } = require("../services/log.service"); // ✅ FR-13 logger
-const { stripPII } = require("../services/pii.service"); // ✅ bias mitigation helper
-
-// ✅ FR-10 feedback generator (writes into feedback table)
+const { logEvent } = require("../services/log.service");
+const { stripPII } = require("../services/pii.service");
 const { generateFeedbackForPair } = require("../services/feedback.service");
 
-/**
- * Utility: Safe JSON.parse to prevent crashes if DB contains invalid JSON.
- */
 function safeJsonParse(value, fallback) {
   try {
-    if (value === null || value === undefined) return fallback;
+    if (value == null) return fallback;
     return JSON.parse(value);
   } catch {
     return fallback;
   }
 }
 
-/**
- * ------------------------------------------------------------
- * POST /api/analysis/rank
- * Body: { jobId }
- *
- * Ranks every resume for the given jobId.
- * Also generates candidate feedback per (jobId, resumeId).
- * ------------------------------------------------------------
- */
+function breakdownToTopTerms(breakdown) {
+  const parsed = safeJsonParse(breakdown, {});
+  if (Array.isArray(parsed?.topTerms)) return parsed.topTerms;
+  if (Array.isArray(parsed?.terms)) return parsed.terms;
+  if (Array.isArray(parsed)) return parsed;
+  return [];
+}
+
 router.post("/rank", requireAuth, requireRole("recruiter", "admin"), async (req, res) => {
-  const jobId = req.body?.jobId;
+  const jobId = Number(req.body?.jobId);
   let t0 = null;
 
   try {
-    // ✅ Validate request
-    if (!jobId) return res.status(400).json({ error: "jobId required" });
+    if (!Number.isFinite(jobId)) {
+      return res.status(400).json({ error: "jobId required" });
+    }
 
-    // ✅ FR-13 audit log: start
-    logEvent("RANKING_STARTED", "Ranking started", { jobId });
     t0 = Date.now();
+    logEvent("RANKING_STARTED", "Ranking started", { jobId }, req, req.user?.id ?? null);
 
-    // ✅ Load job
     const job = db.prepare("SELECT * FROM jobs WHERE id = ?").get(jobId);
     if (!job) return res.status(404).json({ error: "Job not found" });
 
-    // ✅ Load resumes
-    const resumes = db.prepare("SELECT * FROM resumes").all();
-    if (resumes.length === 0) return res.status(400).json({ error: "No resumes uploaded" });
+    // Only score resumes actually applied to this job
+    const resumes = db.prepare(`
+      SELECT r.*
+      FROM applications a
+      JOIN resumes r ON r.id = a.resumeId
+      WHERE a.jobId = ?
+      ORDER BY r.id ASC
+    `).all(jobId);
 
-    // ✅ Deterministic output:
-    // remove old rankings & feedback for the same job, so results are clean each run
+    if (resumes.length === 0) {
+      return res.status(400).json({ error: "No resumes found for this job" });
+    }
+
     db.prepare("DELETE FROM rankings WHERE jobId = ?").run(jobId);
     db.prepare("DELETE FROM feedback WHERE jobId = ?").run(jobId);
 
-    // ✅ Prepared statement for ranking insert (fast & clean)
     const insertRanking = db.prepare(`
-      INSERT INTO rankings (jobId, resumeId, score, scorePercent, topTerms, createdAt)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO rankings (jobId, resumeId, score, breakdown, createdAt)
+      VALUES (?, ?, ?, ?, ?)
     `);
 
-    // ✅ Bias mitigation: sanitise job description ONCE
     const cleanedJobText = stripPII(job.description);
-
     const results = [];
 
-    // ============================================================
-    // Main ranking loop: score each resume + store ranking + feedback
-    // ============================================================
     for (const r of resumes) {
-      // ✅ Prefer stored sanitised text (already PII-stripped).
-      // Fallback: stripPII(raw text) for older DB rows.
-      const usedStoredSanitised = !!(r.sanitisedTextContent && r.sanitisedTextContent.trim());
+      const cleanedResumeText =
+        r.sanitisedTextContent && String(r.sanitisedTextContent).trim()
+          ? r.sanitisedTextContent
+          : stripPII(r.content || "");
 
-      const cleanedResumeText = usedStoredSanitised
-        ? r.sanitisedTextContent
-        : stripPII(r.textContent);
+      logEvent(
+        "BIAS_MITIGATION_USED_FOR_RANKING",
+        "Ranking used sanitised resume text",
+        { jobId, resumeId: r.id },
+        req,
+        req.user?.id ?? null
+      );
 
-      // ✅ FR-13 proof log: bias mitigation was applied during scoring
-      logEvent("BIAS_MITIGATION_USED_FOR_RANKING", "Ranking used sanitised resume text", {
-        jobId,
-        resumeId: r.id,
-        usedStoredSanitised,
-      });
-
-      // ✅ TF-IDF scoring (Node -> Python)
       const scoreResult = await scoreWithTfidf(cleanedJobText, cleanedResumeText);
 
-      // ✅ Store ranking result in DB
+      // DB stores compact schema; frontend can still receive scorePercent/topTerms
+      const breakdown = {
+        scorePercent: scoreResult.scorePercent,
+        topTerms: Array.isArray(scoreResult.topTerms) ? scoreResult.topTerms : [],
+      };
+
       insertRanking.run(
         jobId,
         r.id,
-        scoreResult.score,
-        scoreResult.scorePercent,
-        JSON.stringify(scoreResult.topTerms),
+        Number(scoreResult.score || 0),
+        JSON.stringify(breakdown),
         new Date().toISOString()
       );
 
-      // ✅ FR-10: Generate and store feedback (strengths/gaps/summary)
-      // Feedback should not block ranking if it fails, so wrap in try/catch.
       try {
         generateFeedbackForPair(jobId, r.id, {
           scorePercent: scoreResult.scorePercent,
-          topTermsJson: JSON.stringify(scoreResult.topTerms),
+          topTermsJson: JSON.stringify(breakdown.topTerms),
         });
       } catch (feedbackErr) {
         console.error("FEEDBACK ERROR:", feedbackErr);
-
-        logEvent("ERROR", "Feedback generation failed", {
-          route: "analysis/rank",
-          jobId,
-          resumeId: r.id,
-          error: feedbackErr.message,
-        });
+        logEvent(
+          "ERROR",
+          "Feedback generation failed",
+          { route: "analysis/rank", jobId, resumeId: r.id, error: feedbackErr.message },
+          req,
+          req.user?.id ?? null
+        );
       }
 
-      // ✅ Response payload (for UI) — minimal, fast and readable
       results.push({
         resumeId: r.id,
         resumeName: r.originalName,
         scorePercent: scoreResult.scorePercent,
-        topTerms: scoreResult.topTerms,
+        topTerms: breakdown.topTerms,
       });
     }
 
-    // ✅ Sort results by best match
     results.sort((a, b) => b.scorePercent - a.scorePercent);
 
-    // ✅ FR-13 audit log: done + duration
     const durationMs = Date.now() - t0;
+    logEvent(
+      "RANKING_DONE",
+      "Ranking finished",
+      { jobId, rankedCount: results.length, durationMs },
+      req,
+      req.user?.id ?? null
+    );
 
-    logEvent("RANKING_DONE", "Ranking finished", {
-      jobId,
-      rankedCount: results.length,
-      durationMs,
-    });
-
-    res.json({ jobId, results });
+    return res.json({ jobId, results });
   } catch (e) {
     console.error("RANK ERROR:", e);
-
     const durationMs = t0 ? Date.now() - t0 : null;
 
-    // ✅ FR-13 audit log: error
-    logEvent("ERROR", e.message, {
-      route: "analysis/rank",
-      jobId,
-      durationMs,
-    });
+    logEvent(
+      "ERROR",
+      e.message,
+      { route: "analysis/rank", jobId, durationMs },
+      req,
+      req.user?.id ?? null
+    );
 
-    res.status(500).json({ error: e.message });
+    return res.status(500).json({ error: e.message || "Ranking failed" });
   }
 });
 
-/**
- * ------------------------------------------------------------
- * GET /api/analysis/rankings/:jobId
- * Returns ranking list for a job (sorted DESC).
- * ------------------------------------------------------------
- */
+// Rankings list for one job
 router.get("/rankings/:jobId", requireAuth, requireRole("recruiter", "admin"), (req, res) => {
   const jobId = Number(req.params.jobId);
 
-  const rows = db
-    .prepare(
-      `
-      SELECT rankings.*, resumes.originalName AS resumeName
-      FROM rankings
-      JOIN resumes ON resumes.id = rankings.resumeId
-      WHERE rankings.jobId = ?
-      ORDER BY rankings.scorePercent DESC
-    `
-    )
-    .all(jobId);
+  const rows = db.prepare(`
+    SELECT rankings.*, resumes.originalName AS resumeName
+    FROM rankings
+    JOIN resumes ON resumes.id = rankings.resumeId
+    WHERE rankings.jobId = ?
+    ORDER BY rankings.score DESC
+  `).all(jobId);
 
-  const formatted = rows.map((r) => ({
-    resumeId: r.resumeId,
-    resumeName: r.resumeName,
-    scorePercent: r.scorePercent,
-    topTerms: safeJsonParse(r.topTerms, []),
-  }));
+  const formatted = rows.map((r) => {
+    const topTerms = breakdownToTopTerms(r.breakdown);
+    const scorePercent = Math.round(Number(r.score || 0) * 100);
+
+    return {
+      resumeId: r.resumeId,
+      resumeName: r.resumeName,
+      scorePercent,
+      topTerms,
+    };
+  });
 
   res.json(formatted);
 });
 
-/**
- * ------------------------------------------------------------
- * ✅ FR-10 (Part 4): GET /api/analysis/feedback/:jobId/:resumeId
- * Returns feedback for ONE resume within a job.
- * Great for "View Feedback" button in frontend.
- * ------------------------------------------------------------
- */
+// Feedback for one resume in one job
 router.get("/feedback/:jobId/:resumeId", requireAuth, requireRole("recruiter", "admin"), (req, res) => {
   const jobId = Number(req.params.jobId);
   const resumeId = Number(req.params.resumeId);
 
-  const row = db
-    .prepare(
-      `
-      SELECT feedback.*, resumes.originalName AS resumeName
-      FROM feedback
-      JOIN resumes ON resumes.id = feedback.resumeId
-      WHERE feedback.jobId = ? AND feedback.resumeId = ?
-      ORDER BY feedback.createdAt DESC
-      LIMIT 1
-    `
-    )
-    .get(jobId, resumeId);
+  const row = db.prepare(`
+    SELECT feedback.*, resumes.originalName AS resumeName
+    FROM feedback
+    JOIN resumes ON resumes.id = feedback.resumeId
+    WHERE feedback.jobId = ? AND feedback.resumeId = ?
+    ORDER BY feedback.createdAt DESC
+    LIMIT 1
+  `).get(jobId, resumeId);
 
   if (!row) return res.status(404).json({ error: "Feedback not found" });
 
@@ -265,104 +208,33 @@ router.get("/feedback/:jobId/:resumeId", requireAuth, requireRole("recruiter", "
   });
 });
 
-/**
- * ------------------------------------------------------------
- * ✅ FR-10: GET /api/analysis/feedback/:jobId
- * Optional query: ?resumeId=#
- *
- * Returns feedback for ALL resumes in a job.
- * If resumeId is given, returns only that resume's feedback.
- * ------------------------------------------------------------
- */
-router.get("/feedback/:jobId", requireAuth, requireRole("recruiter", "admin"), (req, res) => {
-  const jobId = Number(req.params.jobId);
-  const resumeId = req.query.resumeId ? Number(req.query.resumeId) : null;
-
-  let rows;
-
-  if (resumeId) {
-    rows = db
-      .prepare(
-        `
-        SELECT feedback.*, resumes.originalName AS resumeName
-        FROM feedback
-        JOIN resumes ON resumes.id = feedback.resumeId
-        WHERE feedback.jobId = ? AND feedback.resumeId = ?
-        ORDER BY feedback.createdAt DESC
-      `
-      )
-      .all(jobId, resumeId);
-  } else {
-    rows = db
-      .prepare(
-        `
-        SELECT feedback.*, resumes.originalName AS resumeName
-        FROM feedback
-        JOIN resumes ON resumes.id = feedback.resumeId
-        WHERE feedback.jobId = ?
-        ORDER BY feedback.createdAt DESC
-      `
-      )
-      .all(jobId);
-  }
-
-  const formatted = rows.map((f) => ({
-    id: f.id,
-    jobId: f.jobId,
-    resumeId: f.resumeId,
-    resumeName: f.resumeName,
-    strengths: safeJsonParse(f.strengths, []),
-    gaps: safeJsonParse(f.gaps, []),
-    summary: f.summary,
-    createdAt: f.createdAt,
-  }));
-
-  res.json(formatted);
-});
-
-/**
- * ------------------------------------------------------------
- * ✅ FR-10 (Part 4): GET /api/analysis/ranked-feedback/:jobId
- * Returns a combined view of:
- * - ranking score + topTerms
- * - feedback strengths/gaps/summary
- *
- * This is ideal for frontend because it avoids multiple API calls.
- * Also perfect for "proof" screenshots in your report/demo.
- * ------------------------------------------------------------
- */
+// Combined ranking + feedback
 router.get("/ranked-feedback/:jobId", requireAuth, requireRole("recruiter", "admin"), (req, res) => {
   const jobId = Number(req.params.jobId);
 
-  const rows = db
-    .prepare(
-      `
-      SELECT
-        rankings.resumeId,
-        resumes.originalName AS resumeName,
-        rankings.scorePercent,
-        rankings.topTerms,
-        feedback.strengths,
-        feedback.gaps,
-        feedback.summary,
-        feedback.createdAt AS feedbackCreatedAt
-      FROM rankings
-      JOIN resumes ON resumes.id = rankings.resumeId
-      LEFT JOIN feedback
-        ON feedback.jobId = rankings.jobId AND feedback.resumeId = rankings.resumeId
-      WHERE rankings.jobId = ?
-      ORDER BY rankings.scorePercent DESC
-    `
-    )
-    .all(jobId);
+  const rows = db.prepare(`
+    SELECT
+      rankings.resumeId,
+      resumes.originalName AS resumeName,
+      rankings.score,
+      rankings.breakdown,
+      feedback.strengths,
+      feedback.gaps,
+      feedback.summary,
+      feedback.createdAt AS feedbackCreatedAt
+    FROM rankings
+    JOIN resumes ON resumes.id = rankings.resumeId
+    LEFT JOIN feedback
+      ON feedback.jobId = rankings.jobId AND feedback.resumeId = rankings.resumeId
+    WHERE rankings.jobId = ?
+    ORDER BY rankings.score DESC
+  `).all(jobId);
 
   const formatted = rows.map((r) => ({
     resumeId: r.resumeId,
     resumeName: r.resumeName,
-    scorePercent: r.scorePercent,
-    topTerms: safeJsonParse(r.topTerms, []),
-
-    // Feedback may be null if ranking ran but feedback generation failed
+    scorePercent: Math.round(Number(r.score || 0) * 100),
+    topTerms: breakdownToTopTerms(r.breakdown),
     strengths: safeJsonParse(r.strengths, []),
     gaps: safeJsonParse(r.gaps, []),
     summary: r.summary || null,
