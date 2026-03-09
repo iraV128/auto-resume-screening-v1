@@ -103,7 +103,7 @@ export default function ApplyJob() {
     }
 
     if (!resumeFile) {
-      setError("Please choose a resume file before submitting.");
+      setError("Please choose a PDF/DOCX file less than 10MB.");
       return;
     }
 
