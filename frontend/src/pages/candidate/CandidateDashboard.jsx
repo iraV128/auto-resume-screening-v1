@@ -59,7 +59,7 @@ export default function CandidateDashboard() {
     <AppShell title="Candidate Dashboard" subtitle="Track your job applications.">
       {!loading && !error && (
         <div className="btn-ok" style={{ padding: 10, marginBottom: 12 }}>
-          ✅ Live mode: showing data for <b>{user?.email}</b>
+          Live mode: <b>{user?.email}</b>
         </div>
       )}
 
